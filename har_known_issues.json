@@ -1,0 +1,414 @@
+{
+  "_meta": {
+    "version": "2.0.0",
+    "last_updated": "2024-05-20",
+    "description": "Enterprise Knowledge Base per analisi HAR. Include regole di detection per Availability, Performance e Security.",
+    "maintainer": "DevOps Team",
+    "schema_version": "v2"
+  },
+  "patterns": [
+    {
+      "id": "H2_MULTIPLEX_STALL",
+      "name": "HTTP/2 Multiplexing Stall",
+      "severity": "CRITICAL",
+      "category": "AVAILABILITY",
+      "impact_score": 90,
+      "remediation_effort": "HIGH",
+      "tags": ["http2", "stall", "network", "connection-limit"],
+      "detect": {
+        "description": "Traffico H2 rilevato, ma le richieste di rete si bloccano mentre la cache funziona. Sintomo di 'phantom streams' o flow control issue.",
+        "logic": {
+          "and": [
+            {"var": "protocol", "op": "eq", "val": "h2"},
+            {"var": "cached_resources", "op": "gt", "val": 0},
+            {"var": "network_resources", "op": "eq", "val": 0},
+            {"var": "html_refs_missing", "op": "eq", "val": true}
+          ]
+        }
+      },
+      "diagnosis": "Il browser ha stabilito la connessione HTTP/2 ma non riesce ad aprire nuovi stream per le risorse critiche. Spesso causato da un disallineamento nel conteggio degli stream attivi tra client, reverse-proxy (Nginx/Envoy) e Application Server.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Disabilitare HTTP/2 sul Reverse Proxy (Hotfix)",
+          "detail": "Forzare downgrade a HTTP/1.1 per sbloccare immediatamente gli utenti.\nNginx: rimuovere 'http2' dalla direttiva listen.\nAWS ALB: Disabilitare HTTP/2 nei setting degli attributi.",
+          "complexity": "LOW"
+        },
+        {
+          "priority": 2,
+          "action": "Tuning parametri HTTP/2",
+          "detail": "Aumentare `http2_max_concurrent_streams` e verificare `http2_idle_timeout`.\nAssicurarsi che il timeout del Load Balancer sia inferiore a quello del backend (Keep-Alive tuning).",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://www.nginx.com/blog/http2-module-nginx/", "https://github.com/envoyproxy/envoy/issues/13602"]
+    },
+    {
+      "id": "SSL_HANDSHAKE_FAILURE",
+      "name": "Fallimento Handshake SSL/TLS",
+      "severity": "CRITICAL",
+      "category": "AVAILABILITY",
+      "impact_score": 100,
+      "remediation_effort": "MEDIUM",
+      "tags": ["ssl", "tls", "certificate", "crypto"],
+      "detect": {
+        "description": "Richieste fallite con errori specifici legati al livello SSL/TLS prima di inviare dati.",
+        "logic": {
+          "or": [
+            {"var": "error_text", "op": "contains", "val": "err_ssl_protocol_error"},
+            {"var": "error_text", "op": "contains", "val": "err_cert_authority_invalid"},
+            {"var": "time_ssl", "op": "eq", "val": -1}
+          ]
+        }
+      },
+      "diagnosis": "La connessione cifrata non può essere stabilita. Cause comuni: certificato scaduto, catena incompleta (missing intermediate), o cipher suite non supportata dal client.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Verifica Validità e Chain del Certificato",
+          "detail": "Usare `openssl s_client -connect domain:443 -showcerts`. Verificare che la catena sia completa e non self-signed (se pubblico).",
+          "complexity": "LOW"
+        },
+        {
+          "priority": 2,
+          "action": "Verificare protocolli TLS supportati",
+          "detail": "Il server potrebbe aver disabilitato TLS 1.2 o supportare solo TLS 1.3 con cipher non standard. Assicurarsi di supportare almeno TLS 1.2.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://ssllabs.com/ssltest/", "https://wiki.mozilla.org/Security/Server_Side_TLS"]
+    },
+    {
+      "id": "COMPRESSION_MISSING",
+      "name": "Compressione Gzip/Brotli Assente",
+      "severity": "MEDIUM",
+      "category": "PERFORMANCE",
+      "impact_score": 60,
+      "remediation_effort": "LOW",
+      "tags": ["performance", "compression", "bandwidth", "latency"],
+      "detect": {
+        "description": "Risorse testuali (JSON, JS, CSS) > 2KB trasferite senza header Content-Encoding.",
+        "logic": {
+          "and": [
+            {"var": "mimeType", "op": "regex", "val": "(text/|json|javascript|xml)"},
+            {"var": "transferSize", "op": "gt", "val": 2048},
+            {"var": "header.Content-Encoding", "op": "missing"}
+          ]
+        }
+      },
+      "diagnosis": "Risorse testuali comprimibili vengono inviate 'raw', aumentando il tempo di download e il consumo dati. Gzip riduce tipicamente il payload del 70%.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Abilitare compressione sul Web Server",
+          "detail": "Nginx: `gzip on; gzip_types ...`\nApache: `mod_deflate`\nNodeJS: usare middleware `compression`.",
+          "complexity": "LOW"
+        },
+        {
+          "priority": 2,
+          "action": "Verificare configurazione CDN/Proxy",
+          "detail": "A volte la CDN non comprime se manca l'header `Via` o se il contenuto è dinamico. Forzare la compressione a livello edge.",
+          "complexity": "LOW"
+        }
+      ],
+      "references": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Compression", "https://web.dev/uses-text-compression/"]
+    },
+    {
+      "id": "CACHE_CONTROL_MISSING",
+      "name": "Caching Statico Assente o Debole",
+      "severity": "MEDIUM",
+      "category": "PERFORMANCE",
+      "impact_score": 50,
+      "remediation_effort": "LOW",
+      "tags": ["cache", "performance", "static-assets"],
+      "detect": {
+        "description": "Risorse statiche (immagini, font, CSS) servite senza header Cache-Control o con TTL molto breve (< 1 ora).",
+        "logic": {
+          "and": [
+            {"var": "method", "op": "eq", "val": "GET"},
+            {"var": "status", "op": "eq", "val": 200},
+            {"var": "type", "op": "in", "val": ["image", "font", "css", "script"]},
+            {"var": "header.Cache-Control", "op": "missing_or_weak", "val": 3600}
+          ]
+        }
+      },
+      "diagnosis": "Il browser è costretto a riscaricare risorse invariate ad ogni visita, aumentando la latenza e il carico sul server.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Impostare Cache-Control per asset immutabili",
+          "detail": "Per file con hash nel nome (es. main.a1b2.js): `Cache-Control: public, max-age=31536000, immutable`.",
+          "complexity": "LOW"
+        },
+        {
+          "priority": 2,
+          "action": "Configurare ETag / Last-Modified",
+          "detail": "Assicurarsi che il server invii validator headers per permettere il 304 Not Modified.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://web.dev/http-cache/"]
+    },
+    {
+      "id": "SENSITIVE_DATA_URL",
+      "name": "Dati Sensibili in URL (Security Leak)",
+      "severity": "CRITICAL",
+      "category": "SECURITY",
+      "impact_score": 95,
+      "remediation_effort": "HIGH",
+      "cwe_id": "CWE-598",
+      "tags": ["security", "privacy", "gdpr", "owasp"],
+      "detect": {
+        "description": "Rilevati parametri query string sospetti (password, token, secret, key) nell'URL della richiesta.",
+        "logic": {
+          "var": "url_query",
+          "op": "regex",
+          "val": "(?i)(password|passwd|pwd|secret|token|auth_key|api_key|access_token)="
+        }
+      },
+      "diagnosis": "Le credenziali passate via URL rimangono nei log del server, nella cronologia del browser e nei log dei proxy intermedi. Violazione grave di sicurezza.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Spostare i parametri nel Body o Header",
+          "detail": "Modificare l'applicazione per passare i dati sensibili via POST body (form-data/json) o via header `Authorization: Bearer ...`.",
+          "complexity": "HIGH"
+        },
+        {
+          "priority": 2,
+          "action": "Rotazione immediata delle credenziali",
+          "detail": "Se questi log sono persistiti, considerare le chiavi esposte come compromesse.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://owasp.org/www-community/vulnerabilities/Information_exposure_through_query_strings_in_url"]
+    },
+    {
+      "id": "CORS_BLOCK",
+      "name": "Blocco CORS (Cross-Origin Resource Sharing)",
+      "severity": "CRITICAL",
+      "category": "AVAILABILITY",
+      "impact_score": 85,
+      "remediation_effort": "LOW",
+      "tags": ["cors", "api", "security"],
+      "detect": {
+        "description": "Richieste API verso altro dominio fallite con errore CORS o preflight OPTIONS fallito.",
+        "logic": {
+          "and": [
+            {"var": "error_text", "op": "contains", "val": "cors"},
+            {"var": "status", "op": "eq", "val": 0}
+          ]
+        }
+      },
+      "diagnosis": "Il browser blocca la lettura della risposta perché il server di destinazione non include l'header `Access-Control-Allow-Origin` che corrisponde all'origine della pagina.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Configurare header CORS sul Backend",
+          "detail": "Aggiungere `Access-Control-Allow-Origin: <origin>` e `Access-Control-Allow-Methods`.",
+          "complexity": "LOW"
+        },
+        {
+          "priority": 2,
+          "action": "Usare un Proxy Locale",
+          "detail": "In sviluppo, configurare il dev server (Vite/Webpack) per proxare le richieste API (`/api` -> backend), eliminando il problema CORS.",
+          "complexity": "LOW"
+        }
+      ],
+      "references": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS"]
+    },
+    {
+      "id": "TTFB_HIGH_LATENCY",
+      "name": "Backend Lento (High TTFB)",
+      "severity": "WARNING",
+      "category": "PERFORMANCE",
+      "impact_score": 70,
+      "remediation_effort": "HIGH",
+      "tags": ["latency", "backend", "database", "slow"],
+      "detect": {
+        "description": "Time To First Byte (attesa server) superiore a 1000ms su richieste dinamiche.",
+        "logic": {
+          "and": [
+            {"var": "timings.wait", "op": "gt", "val": 1000},
+            {"var": "status", "op": "eq", "val": 200}
+          ]
+        }
+      },
+      "diagnosis": "Il server impiega troppo tempo a generare la risposta. Indica colli di bottiglia nel codice applicativo, query database lente o chiamate esterne sincrone.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Analisi APM / Profiling",
+          "detail": "Utilizzare strumenti come Datadog, NewRelic o OpenTelemetry per tracciare cosa fa il backend durante quei secondi (es. Slow Query SQL).",
+          "complexity": "MEDIUM"
+        },
+        {
+          "priority": 2,
+          "action": "Database Indexing",
+          "detail": "Verificare se le query eseguite mancano di indici appropriati.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://web.dev/ttfb/"]
+    },
+    {
+      "id": "MIXED_CONTENT",
+      "name": "Mixed Content (Insecure Resource)",
+      "severity": "HIGH",
+      "category": "SECURITY",
+      "impact_score": 60,
+      "remediation_effort": "LOW",
+      "tags": ["ssl", "https", "security"],
+      "detect": {
+        "description": "Pagina HTTPS che carica risorse via HTTP. Spesso bloccate dal browser.",
+        "logic": {
+          "and": [
+            {"var": "page_protocol", "op": "eq", "val": "https"},
+            {"var": "request_protocol", "op": "eq", "val": "http"},
+            {"var": "status", "op": "eq", "val": 0}
+          ]
+        }
+      },
+      "diagnosis": "Compromette la sicurezza della pagina HTTPS. I browser moderni bloccano di default script e iframe misti (Mixed Active Content).",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Migrare URL a HTTPS",
+          "detail": "Sostituire `http://` con `https://` o `//` (protocol-relative) nel codice sorgente.",
+          "complexity": "LOW"
+        },
+        {
+          "priority": 2,
+          "action": "CSP Upgrade-Insecure-Requests",
+          "detail": "Aggiungere header `Content-Security-Policy: upgrade-insecure-requests` per forzare il browser a provare HTTPS prima di fallire.",
+          "complexity": "LOW"
+        }
+      ],
+      "references": ["https://developer.mozilla.org/en-US/docs/Web/Security/Mixed_content"]
+    },
+    {
+      "id": "LARGE_IMAGE_UNOPTIMIZED",
+      "name": "Immagine Pesante non Ottimizzata",
+      "severity": "WARNING",
+      "category": "PERFORMANCE",
+      "impact_score": 40,
+      "remediation_effort": "LOW",
+      "tags": ["images", "performance", "bandwidth"],
+      "detect": {
+        "description": "Immagini raster (JPEG/PNG) superiori a 500KB che potrebbero essere ottimizzate.",
+        "logic": {
+          "and": [
+            {"var": "mimeType", "op": "regex", "val": "image/(jpeg|png)"},
+            {"var": "transferSize", "op": "gt", "val": 512000}
+          ]
+        }
+      },
+      "diagnosis": "Immagini di grandi dimensioni rallentano il Largest Contentful Paint (LCP).",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Convertire in WebP / AVIF",
+          "detail": "Utilizzare formati moderni che offrono compressione migliore (spesso -30% size).",
+          "complexity": "LOW"
+        },
+        {
+          "priority": 2,
+          "action": "Ridimensionare (Responsive Images)",
+          "detail": "Non servire un'immagine 4000px per un box di 300px. Usare l'attributo `srcset`.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://web.dev/optimize-lcp/"]
+    },
+    {
+      "id": "CLEARTEXT_AUTH",
+      "name": "Autenticazione in Chiaro (HTTP)",
+      "severity": "CRITICAL",
+      "category": "SECURITY",
+      "impact_score": 100,
+      "remediation_effort": "MEDIUM",
+      "cwe_id": "CWE-319",
+      "tags": ["security", "auth", "http"],
+      "detect": {
+        "description": "Credenziali inviate su connessione non criptata (HTTP).",
+        "logic": {
+          "and": [
+            {"var": "request_protocol", "op": "eq", "val": "http"},
+            {"var": "header.Authorization", "op": "exists"}
+          ]
+        }
+      },
+      "diagnosis": "Chiunque sulla rete (WiFi pubblico, ISP) può intercettare il token di autenticazione e impersonare l'utente.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Forzare HTTPS",
+          "detail": "Configurare redirect 301 da HTTP a HTTPS sul server. Abilitare HSTS (Strict-Transport-Security).",
+          "complexity": "LOW"
+        }
+      ],
+      "references": ["https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Protection_Cheat_Sheet.html"]
+    },
+    {
+      "id": "BACKEND_OVERLOAD_5XX",
+      "name": "Backend Overload (Errori 5xx)",
+      "severity": "CRITICAL",
+      "category": "AVAILABILITY",
+      "impact_score": 90,
+      "remediation_effort": "HIGH",
+      "tags": ["5xx", "reliability", "timeout"],
+      "detect": {
+        "description": "Rilevati molteplici errori server (500, 502, 503, 504).",
+        "logic": {
+          "var": "status",
+          "op": "gte",
+          "val": 500
+        }
+      },
+      "diagnosis": "Il servizio non è disponibile. 500=Errore Codice, 502=Bad Gateway (upstream giù), 503=Service Unavailable (sovraccarico), 504=Gateway Timeout (upstream lento).",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Check Health Upstream",
+          "detail": "Se 502/504: verificare se l'application server (es. Gunicorn, PM2, Tomcat) è attivo e raggiungibile dal Load Balancer.",
+          "complexity": "MEDIUM"
+        },
+        {
+          "priority": 2,
+          "action": "Check Log Errori",
+          "detail": "Se 500: esaminare stack trace. Spesso NullPointer, connessione DB fallita o Out of Memory.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status#server_error_responses"]
+    },
+    {
+      "id": "COOKIE_NO_SECURE",
+      "name": "Cookie Insicuri (Missing Secure/HttpOnly)",
+      "severity": "HIGH",
+      "category": "SECURITY",
+      "impact_score": 75,
+      "remediation_effort": "LOW",
+      "tags": ["cookie", "security", "xss"],
+      "detect": {
+        "description": "Cookie impostati senza flag Secure o HttpOnly.",
+        "logic": {
+          "and": [
+             {"var": "header.Set-Cookie", "op": "exists"},
+             {"var": "cookie_flags", "op": "missing", "val": ["Secure", "HttpOnly"]}
+          ]
+        }
+      },
+      "diagnosis": "Senza 'Secure', il cookie viene inviato in chiaro se l'utente passa a HTTP. Senza 'HttpOnly', il cookie è accessibile via JS (vulnerabile a XSS).",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Aggiornare Configurazione Cookie",
+          "detail": "Impostare `Secure; HttpOnly; SameSite=Lax` per tutti i cookie di sessione.",
+          "complexity": "LOW"
+        }
+      ],
+      "references": ["https://owasp.org/www-community/HttpOnly"]
+    }
+  ]
+}
