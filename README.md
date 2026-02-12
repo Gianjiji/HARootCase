@@ -1,4 +1,4 @@
-# 🚀 HAR Analyzer Pro v3.0 – Enterprise Edition
+# 🚀 HAR Analyzer Pro v0.1 – Enterprise Edition
 
 Suite diagnostica **enterprise** per l’analisi automatizzata di file HTTP Archive (HAR), con rilevamento anomalie differenziale, scansione sicurezza e reportistica forense.
 
