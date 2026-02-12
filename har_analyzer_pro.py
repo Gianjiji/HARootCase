@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import webbrowser
 from datetime import datetime
 
-__version__ = "3.0.0"
+__version__ = "0.1"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CONFIGURAZIONE
