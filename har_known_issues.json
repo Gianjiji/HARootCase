@@ -1,7 +1,7 @@
 {
   "_meta": {
-    "version": "2.0.0",
-    "last_updated": "2024-05-20",
+    "version": "2.1.0",
+    "last_updated": "2026-06-17",
     "description": "Enterprise Knowledge Base per analisi HAR. Include regole di detection per Availability, Performance e Security.",
     "maintainer": "DevOps Team",
     "schema_version": "v2"
@@ -409,6 +409,308 @@
         }
       ],
       "references": ["https://owasp.org/www-community/HttpOnly"]
+    },
+    {
+      "id": "H1_HOL_BLOCKING",
+      "name": "HTTP/1.1 Head-of-Line Blocking",
+      "severity": "WARNING",
+      "category": "PERFORMANCE",
+      "impact_score": 65,
+      "remediation_effort": "MEDIUM",
+      "tags": ["http1.1", "connection-limit", "performance", "network"],
+      "detect": {
+        "description": "Numero elevato di richieste di rete su una connessione HTTP/1.1 pura (nessun H2 rilevato). Il browser è limitato a ~6 connessioni TCP per host, causando accodamento delle richieste.",
+        "logic": {
+          "and": [
+            {"var": "protocol", "op": "eq", "val": "http/1.1"},
+            {"var": "network_resources", "op": "gt", "val": 60}
+          ]
+        }
+      },
+      "diagnosis": "Con HTTP/1.1 il browser apre un numero limitato di connessioni parallele per host (tipicamente 6). Un numero elevato di risorse di rete su un singolo host forza le richieste in coda, aumentando il tempo di caricamento percepito rispetto a quanto sarebbe possibile con il multiplexing di HTTP/2.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Abilitare HTTP/2 sul server/reverse-proxy",
+          "detail": "Nginx: aggiungere `http2` alla direttiva `listen`. Richiede TLS. Verificare supporto ALPN sul load balancer.",
+          "complexity": "MEDIUM"
+        },
+        {
+          "priority": 2,
+          "action": "Domain Sharding (mitigazione temporanea, solo se H2 non è disponibile)",
+          "detail": "Distribuire le risorse statiche su 2-4 sottodomini per aumentare il numero di connessioni TCP parallele consentite dal browser.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Connection_management_in_HTTP_1.x", "https://web.dev/h2/"]
+    },
+    {
+      "id": "HSTS_MISSING",
+      "name": "Strict-Transport-Security (HSTS) Assente",
+      "severity": "MEDIUM",
+      "category": "SECURITY",
+      "impact_score": 55,
+      "remediation_effort": "LOW",
+      "cwe_id": "CWE-319",
+      "tags": ["security", "hsts", "https", "ssl"],
+      "detect": {
+        "description": "Documento HTML servito su HTTPS senza header Strict-Transport-Security.",
+        "logic": {
+          "and": [
+            {"var": "type", "op": "eq", "val": "document"},
+            {"var": "status", "op": "eq", "val": 200},
+            {"var": "request_protocol", "op": "eq", "val": "https"},
+            {"var": "header.Strict-Transport-Security", "op": "missing"}
+          ]
+        }
+      },
+      "diagnosis": "Senza HSTS, un utente che digita l'URL senza schema o segue un link http:// viene servito per almeno una richiesta in chiaro prima di un eventuale redirect, esponendolo a downgrade/SSL-stripping attack (es. su WiFi pubblico).",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Aggiungere header HSTS",
+          "detail": "`Strict-Transport-Security: max-age=31536000; includeSubDomains`. Valutare il preload (hstspreload.org) solo dopo aver verificato che TUTTI i sottodomini supportino HTTPS.",
+          "complexity": "LOW"
+        }
+      ],
+      "references": ["https://owasp.org/www-project-secure-headers/#http-strict-transport-security", "https://hstspreload.org/"]
+    },
+    {
+      "id": "JWT_TOKEN_IN_URL",
+      "name": "JWT Token Esposto in URL",
+      "severity": "CRITICAL",
+      "category": "SECURITY",
+      "impact_score": 90,
+      "remediation_effort": "MEDIUM",
+      "cwe_id": "CWE-598",
+      "tags": ["security", "jwt", "token", "owasp"],
+      "detect": {
+        "description": "Token JWT (formato header.payload.signature) rilevato nella query string dell'URL.",
+        "logic": {
+          "var": "url_query",
+          "op": "regex",
+          "val": "eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}"
+        }
+      },
+      "diagnosis": "Un JWT in query string finisce nei log del server, nei log dei proxy/CDN intermedi e nella cronologia del browser, restando valido per chiunque lo intercetti fino alla sua scadenza (exp claim).",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Spostare il JWT in Authorization header",
+          "detail": "Usare `Authorization: Bearer <jwt>` invece del query parameter. Per i WebSocket, valutare un token short-lived scambiato in fase di handshake.",
+          "complexity": "MEDIUM"
+        },
+        {
+          "priority": 2,
+          "action": "Invalidare/ruotare il token esposto",
+          "detail": "Se il token risulta già nei log persistiti, trattarlo come compromesso e forzarne la revoca lato server.",
+          "complexity": "LOW"
+        }
+      ],
+      "references": ["https://owasp.org/www-community/vulnerabilities/Information_exposure_through_query_strings_in_url"]
+    },
+    {
+      "id": "OPEN_REDIRECT_RISK",
+      "name": "Possibile Open Redirect",
+      "severity": "HIGH",
+      "category": "SECURITY",
+      "impact_score": 70,
+      "remediation_effort": "MEDIUM",
+      "cwe_id": "CWE-601",
+      "tags": ["security", "redirect", "owasp", "phishing"],
+      "detect": {
+        "description": "Risposta di redirect (3xx) la cui destinazione è guidata da un parametro query controllabile dall'utente (url/redirect/next/return_to/continue=...).",
+        "logic": {
+          "and": [
+            {"var": "status", "op": "in", "val": [301, 302, 303, 307, 308]},
+            {"var": "url_query", "op": "regex", "val": "(?i)(url|redirect|redirect_uri|return_to|returnurl|next|continue)=https?"}
+          ]
+        }
+      },
+      "diagnosis": "Se l'applicazione effettua il redirect verso un valore preso direttamente da un parametro query senza validarlo contro un allowlist di domini, un attaccante può costruire link che sembrano fidati ma reindirizzano a siti di phishing.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Validare la destinazione del redirect",
+          "detail": "Accettare solo path relativi oppure validare il dominio target contro un'allowlist esplicita prima di emettere il redirect.",
+          "complexity": "MEDIUM"
+        },
+        {
+          "priority": 2,
+          "action": "Usare token indiretti invece di URL assoluti",
+          "detail": "Mappare la destinazione a un identificatore interno (es. `next=checkout`) risolto lato server, evitando di accettare URL arbitrari dal client.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards_Cheat_Sheet"]
+    },
+    {
+      "id": "RATE_LIMIT_429",
+      "name": "Rate Limiting Attivo (HTTP 429)",
+      "severity": "WARNING",
+      "category": "AVAILABILITY",
+      "impact_score": 60,
+      "remediation_effort": "MEDIUM",
+      "tags": ["rate-limit", "429", "throttling", "api"],
+      "detect": {
+        "description": "Richieste rifiutate con HTTP 429 Too Many Requests.",
+        "logic": {
+          "var": "status",
+          "op": "eq",
+          "val": 429
+        }
+      },
+      "diagnosis": "Il client (o un proxy/CDN davanti al backend) sta superando una soglia di richieste configurata. Frequente in caso di polling troppo aggressivo, retry senza backoff, o più tab/utenti dietro lo stesso NAT che condividono il rate limit.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Implementare backoff esponenziale",
+          "detail": "Rispettare l'header `Retry-After` se presente. Evitare retry immediati a raffica che aggravano il throttling.",
+          "complexity": "LOW"
+        },
+        {
+          "priority": 2,
+          "action": "Rivedere la policy di rate limiting",
+          "detail": "Se il traffico è legittimo (es. utenti dietro NAT aziendale), valutare una soglia per utente autenticato invece che per IP.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429"]
+    },
+    {
+      "id": "REFERRER_LEAK_THIRD_PARTY",
+      "name": "Leak di Dati Sensibili via Referer a Terze Parti",
+      "severity": "HIGH",
+      "category": "SECURITY",
+      "impact_score": 75,
+      "remediation_effort": "LOW",
+      "cwe_id": "CWE-598",
+      "tags": ["security", "referer", "referrer-policy", "privacy"],
+      "detect": {
+        "description": "Richiesta verso un dominio esterno che porta nell'header Referer un parametro sensibile (token/password/secret/session) della pagina di origine.",
+        "logic": {
+          "and": [
+            {"var": "type", "op": "eq", "val": "external"},
+            {"var": "header.Referer", "op": "regex", "val": "(?i)(token|password|passwd|secret|session|auth)="}
+          ]
+        }
+      },
+      "diagnosis": "Per default il browser invia l'URL completo della pagina corrente (inclusa la query string) come Referer alle richieste cross-origin (script, immagini, tracker). Se l'URL contiene dati sensibili, questi vengono esposti al dominio terzo.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Impostare una Referrer-Policy restrittiva",
+          "detail": "`Referrer-Policy: strict-origin-when-cross-origin` (o `no-referrer` per le richieste più sensibili) limita o elimina la query string inviata cross-origin.",
+          "complexity": "LOW"
+        },
+        {
+          "priority": 2,
+          "action": "Eliminare i dati sensibili dalla query string",
+          "detail": "Spostare token/credenziali nel body o in header dedicati invece che nell'URL della pagina, alla radice del problema.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy"]
+    },
+    {
+      "id": "SLOW_DNS_RESOLUTION",
+      "name": "Risoluzione DNS Lenta",
+      "severity": "WARNING",
+      "category": "PERFORMANCE",
+      "impact_score": 45,
+      "remediation_effort": "MEDIUM",
+      "tags": ["dns", "performance", "network", "latency"],
+      "detect": {
+        "description": "Tempo di lookup DNS superiore a 300ms su una richiesta.",
+        "logic": {
+          "var": "timings.dns",
+          "op": "gt",
+          "val": 300
+        }
+      },
+      "diagnosis": "Una risoluzione DNS lenta aggiunge latenza prima ancora che la connessione TCP venga aperta. Cause comuni: resolver DNS lontano/non in cache, troppi sottodomini univoci senza prefetch, o provider DNS autoritativo lento.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Abilitare DNS prefetch / preconnect",
+          "detail": "Aggiungere `<link rel=\"dns-prefetch\">` o `<link rel=\"preconnect\">` per i domini di terze parti noti, così la risoluzione avviene in anticipo rispetto alla richiesta effettiva.",
+          "complexity": "LOW"
+        },
+        {
+          "priority": 2,
+          "action": "Verificare il TTL e il provider DNS",
+          "detail": "TTL troppo basso forza lookup ripetuti. Considerare un provider DNS anycast a bassa latenza.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://web.dev/dns-prefetch/"]
+    },
+    {
+      "id": "SLOW_TCP_CONNECT",
+      "name": "Apertura Connessione TCP Lenta",
+      "severity": "WARNING",
+      "category": "PERFORMANCE",
+      "impact_score": 45,
+      "remediation_effort": "MEDIUM",
+      "tags": ["tcp", "performance", "network", "latency"],
+      "detect": {
+        "description": "Tempo di apertura della connessione TCP (three-way handshake) superiore a 300ms.",
+        "logic": {
+          "var": "timings.connect",
+          "op": "gt",
+          "val": 300
+        }
+      },
+      "diagnosis": "Un handshake TCP lento indica tipicamente distanza di rete elevata (RTT alto), un load balancer/proxy sovraccarico in fase di accept(), oppure problemi di packet loss che forzano retransmission durante il setup della connessione.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Verificare la distanza geografica / CDN edge",
+          "detail": "Se il traffico arriva da regioni lontane dal datacenter, valutare un CDN o PoP più vicini all'utente per terminare la connessione TCP.",
+          "complexity": "MEDIUM"
+        },
+        {
+          "priority": 2,
+          "action": "Controllare il carico del Load Balancer",
+          "detail": "Un backlog di accept() pieno o un LB sotto stress aumenta il tempo di completamento dell'handshake. Verificare metriche di connessioni in coda.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://hpbn.co/building-blocks-of-tcp/"]
+    },
+    {
+      "id": "THIRD_PARTY_RESOURCE_BLOCKED",
+      "name": "Risorsa di Terze Parti Bloccata (Single Point of Failure)",
+      "severity": "WARNING",
+      "category": "AVAILABILITY",
+      "impact_score": 50,
+      "remediation_effort": "MEDIUM",
+      "tags": ["third-party", "spof", "availability"],
+      "detect": {
+        "description": "Richiesta verso un dominio esterno bloccata o cancellata (status 0).",
+        "logic": {
+          "and": [
+            {"var": "type", "op": "eq", "val": "external"},
+            {"var": "status", "op": "eq", "val": 0}
+          ]
+        }
+      },
+      "diagnosis": "Una risorsa di terze parti (analytics, tag manager, font, widget) non si carica. Se la risorsa è render-blocking o sincrona, il fornitore esterno diventa un Single Point of Failure capace di degradare l'intera pagina anche quando l'infrastruttura propria è sana.",
+      "solutions": [
+        {
+          "priority": 1,
+          "action": "Caricare gli script di terze parti in modo asincrono/differito",
+          "detail": "Usare `async`/`defer` o caricare dinamicamente via JS dopo l'evento `load`, così un fallimento del terzo non blocca il rendering della pagina.",
+          "complexity": "LOW"
+        },
+        {
+          "priority": 2,
+          "action": "Aggiungere timeout e fallback",
+          "detail": "Per widget critici, implementare un timeout lato client con fallback grazioso se la risorsa esterna non risponde.",
+          "complexity": "MEDIUM"
+        }
+      ],
+      "references": ["https://web.dev/script-component-spof/"]
     }
   ]
 }
