@@ -82,6 +82,23 @@ HARootCase integra una scansione di sicurezza e privacy sui tracciati:
 
 I risultati vengono riportati sia in console sia nella sezione Security del report HTML.
 
+### Il report non riproduce ciò che segnala
+
+Un report viene allegato a un ticket o inoltrato: deve dire *che cosa* è esposto
+e *dove*, non il valore. Tutto ciò che viene mostrato (console, HTML, contesto
+inviato all'AI locale) passa da `mask_secrets()`:
+
+- `?user=ada&password=…` diventa `?user=ada&password=[REDACTED]`: resta il nome
+  del parametro, sparisce il valore. Lo stesso per i corpi form e JSON.
+- token JWT, `Bearer …`/`Basic …` e credenziali `utente:password@host` diventano
+  `[REDACTED]`;
+- dei numeri di carta validi restano solo le ultime quattro cifre;
+- degli indirizzi email restano l'iniziale e il dominio.
+
+Host e percorso delle URL restano leggibili, perché servono alla diagnosi.
+I file `.har` e i report generati sono in `.gitignore`: contengono dati di
+navigazione reali e non vanno versionati.
+
 ---
 
 ## 📊 Report HTML Enterprise

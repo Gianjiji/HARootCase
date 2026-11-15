@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Report generati dallo strumento e file HAR analizzati: contengono dati di
+# navigazione reali (URL, cookie, token) e non vanno mai versionati.
+*.har
+*.html
+*_local_ai.json
+
+# Sistema
+.DS_Store
+Thumbs.db
