@@ -178,6 +178,14 @@ class Finding:
     evidence: dict = field(default_factory=dict)
     kb_pattern_id: str = ""
 
+    def __post_init__(self) -> None:
+        # Mascherato alla fonte: qualunque uscita (console, HTML, AI) riceve già
+        # il testo senza credenziali, anche quelle aggiunte in futuro.
+        self.title = mask_secrets(self.title)
+        self.detail = mask_secrets(self.detail)
+        self.insight = mask_secrets(self.insight)
+        self.evidence = _mask_value(self.evidence)
+
 @dataclass
 class KBMatch:
     pattern_id: str
@@ -189,6 +197,10 @@ class KBMatch:
     solutions: list
     references: list = field(default_factory=list)
     category: str = ""
+
+    def __post_init__(self) -> None:
+        self.diagnosis = mask_secrets(self.diagnosis)
+        self.evidence = _mask_value(self.evidence)
     impact_score: int = 0
 
 @dataclass
@@ -226,10 +238,145 @@ class AnalysisResult:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  CREDENZIALI NEI TESTI MOSTRATI
+# ═══════════════════════════════════════════════════════════════════════════════
+# Un HAR contiene tutto ciò che il browser ha inviato: password nelle URL, token,
+# cookie. Lo strumento li segnala, ma il report (a video, in HTML, verso l'AI)
+# non deve riprodurli: un report viene allegato a un ticket, inoltrato, lasciato
+# aperto. Tutto ciò che viene mostrato passa quindi da mask_secrets(): resta
+# visibile *che cosa* è esposto e *dove*, mai il valore.
+
+SECRET_MASK = "[REDACTED]"
+
+_SECRET_KEYS = (
+    "access_token", "refresh_token", "id_token", "auth_token", "token",
+    "api_key", "apikey", "api-key", "x-api-key", "client_secret", "secret",
+    "private_key", "password", "passwd", "pwd", "authorization", "auth",
+    "signature", "sig", "sessionid", "session_id", "session", "sid", "jwt",
+    "bearer", "code", "key",
+)
+_SECRET_KEYS_ALT = "|".join(sorted((re.escape(k) for k in _SECRET_KEYS), key=len, reverse=True))
+# chiave=valore, in una query string o in un corpo form-encoded
+_SECRET_PARAM_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(" + _SECRET_KEYS_ALT + r")=([^&\s\"'<>#;]+)")
+# "chiave": "valore", in un corpo JSON
+_SECRET_JSON_RE = re.compile(
+    r"(?i)([\"'])(" + _SECRET_KEYS_ALT + r")\1(\s*:\s*)([\"'])(?:\\.|(?!\4).)*\4")
+_SECRET_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}")
+# Almeno 16 caratteri: "basic authentication" in una frase non è un token.
+_SECRET_BEARER_RE = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{16,}")
+_SECRET_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@")
+_CARD_CANDIDATE_RE = re.compile(r"(?<![\d.,])\d(?:[ -]?\d){12,18}(?![\d.,])")
+_EMAIL_SHOWN_RE = re.compile(r"([A-Za-z0-9._%+\-]+)@([A-Za-z0-9.\-]+\.([A-Za-z]{2,}))")
+# "logo@2x.png" ha la forma di un indirizzo ma è un file: non va toccato.
+_ASSET_EXTENSIONS = frozenset({
+    "png", "jpg", "jpeg", "gif", "svg", "webp", "avif", "ico", "bmp", "css", "js", "mjs",
+    "map", "json", "html", "htm", "woff", "woff2", "ttf", "otf", "eot", "mp4", "webm", "pdf",
+})
+
+
+def _luhn_ok(digits: str) -> bool:
+    """Controllo di Luhn: distingue un numero di carta da un id o un timestamp."""
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = ord(ch) - 48
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def _mask_card(match) -> str:
+    digits = re.sub(r"\D", "", match.group(0))
+    if not 13 <= len(digits) <= 19 or len(set(digits)) == 1 or not _luhn_ok(digits):
+        return match.group(0)
+    return f"[carta •••• {digits[-4:]}]"
+
+
+def _mask_email(match) -> str:
+    if match.group(3).lower() in _ASSET_EXTENSIONS:
+        return match.group(0)
+    return f"{match.group(1)[:1]}•••@{match.group(2)}"
+
+
+def mask_secrets(text: Any) -> str:
+    """Nasconde i valori delle credenziali in un testo destinato a essere mostrato.
+
+    Restano il nome del parametro e il resto del testo: `?user=ada&password=x`
+    diventa `?user=ada&password=[REDACTED]`. Nasconde: parametri dal nome
+    sensibile (in URL, form e JSON), JWT, token Bearer/Basic, credenziali
+    `utente:password@host`, numeri di carta validi (ne restano le ultime 4
+    cifre) e indirizzi email (ne restano l'iniziale e il dominio). È idempotente
+    e non tocca testi senza credenziali.
+    """
+    if text is None:
+        return ""
+    s = str(text)
+    if not s:
+        return s
+    s = _SECRET_JWT_RE.sub(SECRET_MASK, s)
+    s = _SECRET_USERINFO_RE.sub(lambda m: m.group(1) + SECRET_MASK + "@", s)
+    s = _SECRET_JSON_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}{m.group(1)}{m.group(3)}{m.group(4)}{SECRET_MASK}{m.group(4)}", s)
+    s = _SECRET_PARAM_RE.sub(lambda m: m.group(1) + "=" + SECRET_MASK, s)
+    s = _SECRET_BEARER_RE.sub(lambda m: m.group(1) + " " + SECRET_MASK, s)
+    s = _CARD_CANDIDATE_RE.sub(_mask_card, s)
+    s = _EMAIL_SHOWN_RE.sub(_mask_email, s)
+    return s
+
+
+def _mask_value(value: Any) -> Any:
+    """mask_secrets applicato in profondità a stringhe, liste e dizionari."""
+    if isinstance(value, str):
+        return mask_secrets(value)
+    if isinstance(value, dict):
+        return {k: _mask_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return type(value)(_mask_value(v) for v in value)
+    return value
+
+
+def describe_pii(pii_type: str, matched: str) -> str:
+    """Come nominare un dato sensibile trovato, senza riportarlo."""
+    if pii_type == "api_key_in_url":
+        key, _, value = matched.partition("=")
+        return f"{key}={SECRET_MASK} ({len(value)} caratteri)"
+    if pii_type == "bearer_token":
+        return f"Bearer {SECRET_MASK}"
+    if pii_type == "jwt":
+        return f"{SECRET_MASK} (JWT, {len(matched)} caratteri)"
+    if pii_type == "credit_card":
+        digits = re.sub(r"\D", "", matched)
+        return f"[carta •••• {digits[-4:]}]" if len(digits) >= 4 else SECRET_MASK
+    if pii_type == "email":
+        local, _, domain = matched.partition("@")
+        return f"{local[:1]}•••@{domain}" if domain else SECRET_MASK
+    return SECRET_MASK
+
+
+def url_without_query(url: str) -> str:
+    """La URL senza query string né frammento: dove si trova il dato, non il dato."""
+    try:
+        parsed = urlparse(str(url))
+        bare = parsed._replace(query="", fragment="").geturl()
+    except Exception:
+        bare = str(url).split("?", 1)[0]
+    return mask_secrets(bare) + ("?…" if "?" in str(url) else "")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  HELPERS GENERICI
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def short_url(url: str, maxlen: int = 90) -> str:
+    """URL per la visualizzazione: credenziali nascoste, poi accorciata.
+
+    Si maschera prima di accorciare: tagliando prima, un `password=abc...`
+    troncato a metà valore non verrebbe più riconosciuto.
+    """
+    url = mask_secrets(url)
     if len(url) <= maxlen:
         return url
     return url[:maxlen - 3] + "..."
@@ -1140,7 +1287,8 @@ class SecurityScanner:
                     category=FindingCategory.SECURITY,
                     finding_type=f"PII_{pii_type.upper()}",
                     title=f"PII rilevato: {pii_type}",
-                    detail=f"[{location}] {pii_type}: '{matched_val}...' in {short_url(entry.url, 60)}",
+                    detail=(f"[{location}] {pii_type}: {describe_pii(pii_type, match.group())} "
+                            f"in {short_url(url_without_query(entry.url), 60)}"),
                     insight=f"Dato sensibile ({pii_type}) trovato in {location}.",
                     solution="Spostare dati sensibili nel body (POST) o header Authorization. Ruotare le credenziali se esposte.",
                 ))
@@ -2990,11 +3138,11 @@ def main() -> int:
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog=(
                 "Esempi:\n"
-                "  python3 har_analyzer_pro.py                           # auto-discovery\n"
-                "  python3 har_analyzer_pro.py file1.har file2.har       # file specifici\n"
-                "  python3 har_analyzer_pro.py HAR/                      # tutti i .har nella cartella\n"
-                "  python3 har_analyzer_pro.py --latency 2000 *.har      # soglia custom\n"
-                "  python3 har_analyzer_pro.py --no-html                 # solo console\n"
+                "  python3 HARootCase.py                           # auto-discovery\n"
+                "  python3 HARootCase.py file1.har file2.har       # file specifici\n"
+                "  python3 HARootCase.py HAR/                      # tutti i .har nella cartella\n"
+                "  python3 HARootCase.py --latency 2000 *.har      # soglia custom\n"
+                "  python3 HARootCase.py --no-html                 # solo console\n"
             ),
         )
         parser.add_argument("paths", nargs="*", default=[],
